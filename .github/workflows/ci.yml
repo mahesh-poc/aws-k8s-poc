@@ -16,15 +16,12 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Setup Node.js 15
+      - name: Setup Node.js 18
         uses: actions/setup-node@v4
         with:
-          node-version: '15.14.0'
+          node-version: '18'
           cache: 'npm'
           cache-dependency-path: codebase/rdicidr-0.1.0/package-lock.json
-
-      - name: Downgrade npm to v7
-        run: npm install -g npm@7
 
       - name: Verify versions
         run: |
@@ -32,13 +29,13 @@ jobs:
           npm -v
 
       - name: Install dependencies
-        run: npm install
+        run: npm ci
 
       - name: Run ESLint
         run: npm run lint
 
       - name: Run Tests
-        run: CI=true npm run test
+        run: npm run test
 
       - name: Build Application
         run: npm run build
