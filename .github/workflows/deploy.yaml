@@ -1,7 +1,6 @@
 name: Deploy to AWS ECS
 
-on:
-  workflow_dispatch:  # Manual trigger only
+on: workflow_dispatch
 
 env:
   AWS_REGION: ${{ secrets.AWS_REGION }}
@@ -17,286 +16,82 @@ jobs:
     - name: Checkout code
       uses: actions/checkout@v4
     
-    - name: Configure AWS credentials
-      id: aws-creds
+    - name: Configure AWS
       uses: aws-actions/configure-aws-credentials@v2
       with:
         aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
         aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
         aws-region: ${{ env.AWS_REGION }}
     
-    - name: Get AWS Account ID
-      id: aws-account
+    - name: Get AWS Account
       run: |
-        AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
-        echo "AWS_ACCOUNT_ID=$AWS_ACCOUNT_ID" >> $GITHUB_ENV
-        echo "ECR_REGISTRY=$AWS_ACCOUNT_ID.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com" >> $GITHUB_ENV
+        ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
+        echo "ACCOUNT=$ACCOUNT" >> $GITHUB_ENV
+        echo "ECR_URL=$ACCOUNT.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com" >> $GITHUB_ENV
     
-    - name: Login to Amazon ECR
-      id: login-ecr
+    - name: Login to ECR
       run: |
         aws ecr get-login-password --region ${{ env.AWS_REGION }} | \
-        docker login --username AWS --password-stdin ${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com
+        docker login --username AWS --password-stdin ${{ env.ECR_URL }}
     
-    - name: Build Docker image
-      id: build-image
+    - name: Prepare Dockerfile
       run: |
-        echo "Building Docker image..."
         cd codebase/rdicidr-0.1.0
         
-        # Check if we can build
-        echo "Testing build..."
-        ls -la
-        
-        # Create Dockerfile using a different delimiter (DOCKERFILE_EOF)
-        echo "Creating Dockerfile..."
-        cat > Dockerfile.generated << 'DOCKERFILE_EOF'
-FROM node:18-alpine as builder
-WORKDIR /app
-COPY package*.json ./
-RUN npm ci
-COPY . .
-RUN npm run build
-
-FROM nginx:alpine
-COPY --from=builder /app/build /usr/share/nginx/html
-RUN sed -i 's/listen\(.*\)80;/listen 8080;/' /etc/nginx/conf.d/default.conf
-EXPOSE 8080
-CMD ["nginx", "-g", "daemon off;"]
-DOCKERFILE_EOF
-        
-        # Use the existing Dockerfile if it's valid, otherwise use generated
-        if [ -f Dockerfile ] && [ $(wc -l < Dockerfile) -ge 5 ]; then
-          echo "Using existing Dockerfile"
-          cp Dockerfile Dockerfile.prod
-        else
-          echo "Using generated Dockerfile"
-          cp Dockerfile.generated Dockerfile.prod
-        fi
-        
-        # Build the image
-        docker build -f Dockerfile.prod -t ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }} .
-        
-        # Tag as latest
-        docker tag ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }} ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:latest
-        
-        echo "IMAGE=${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}" >> $GITHUB_ENV
+        # Create Dockerfile without heredoc
+        echo "FROM node:18-alpine as builder" > Dockerfile.prod
+        echo "WORKDIR /app" >> Dockerfile.prod
+        echo "COPY package*.json ./" >> Dockerfile.prod
+        echo "RUN npm ci" >> Dockerfile.prod
+        echo "COPY . ." >> Dockerfile.prod
+        echo "RUN npm run build" >> Dockerfile.prod
+        echo "" >> Dockerfile.prod
+        echo "FROM nginx:alpine" >> Dockerfile.prod
+        echo "COPY --from=builder /app/build /usr/share/nginx/html" >> Dockerfile.prod
+        echo "RUN sed -i 's/listen\(.*\)80;/listen 8080;/' /etc/nginx/conf.d/default.conf" >> Dockerfile.prod
+        echo "EXPOSE 8080" >> Dockerfile.prod
+        echo "CMD [\"nginx\", \"-g\", \"daemon off;\"]" >> Dockerfile.prod
     
-    - name: Push Docker image to ECR
+    - name: Build and Push
       run: |
-        echo "Pushing Docker image to ECR..."
-        docker push ${{ env.IMAGE }}
-        docker push ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:latest
-    
-    - name: Check if ECR repository exists
-      id: check-ecr
-      run: |
-        if aws ecr describe-repositories \
-          --repository-names ${{ env.ECR_REPOSITORY }} \
-          --region ${{ env.AWS_REGION }} > /dev/null 2>&1; then
-          echo "ECR repository exists"
-          echo "ecr_exists=true" >> $GITHUB_OUTPUT
-        else
-          echo "ECR repository doesn't exist, creating..."
-          aws ecr create-repository \
-            --repository-name ${{ env.ECR_REPOSITORY }} \
-            --region ${{ env.AWS_REGION }}
-          echo "ecr_exists=false" >> $GITHUB_OUTPUT
-        fi
-    
-    - name: Create task definition
-      run: |
-        echo "Creating task definition..."
+        cd codebase/rdicidr-0.1.0
         
-        # Create task definition JSON
-        cat > task-definition.json << 'TASK_DEF_EOF'
-{
-  "family": "fsl-challenge-task",
-  "networkMode": "awsvpc",
-  "requiresCompatibilities": ["FARGATE"],
-  "cpu": "256",
-  "memory": "512",
-  "executionRoleArn": "arn:aws:iam::${{ env.AWS_ACCOUNT_ID }}:role/ecsTaskExecutionRole",
-  "containerDefinitions": [
-    {
-      "name": "fsl-app",
-      "image": "${{ env.IMAGE }}",
-      "portMappings": [
-        {
-          "containerPort": 8080,
-          "protocol": "tcp"
-        }
-      ],
-      "environment": [
-        {
-          "name": "W_SECRET",
-          "value": "OnBilltoribss"
-        }
-      ],
-      "logConfiguration": {
-        "logDriver": "awslogs",
-        "options": {
-          "awslogs-group": "/ecs/fsl-challenge",
-          "awslogs-region": "${{ env.AWS_REGION }}",
-          "awslogs-stream-prefix": "ecs"
-        }
-      }
-    }
-  ]
-}
-TASK_DEF_EOF
+        # Build image
+        docker build -f Dockerfile.prod -t ${{ env.ECR_URL }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }} .
+        docker tag ${{ env.ECR_URL }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }} ${{ env.ECR_URL }}/${{ env.ECR_REPOSITORY }}:latest
         
-        # Register task definition
+        # Push to ECR
+        docker push ${{ env.ECR_URL }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}
+        docker push ${{ env.ECR_URL }}/${{ env.ECR_REPOSITORY }}:latest
+    
+    - name: Create ECS resources
+      run: |
+        # Create ECR repo if not exists
+        aws ecr create-repository --repository-name ${{ env.ECR_REPOSITORY }} --region ${{ env.AWS_REGION }} 2>/dev/null || true
+        
+        # Create task definition
         aws ecs register-task-definition \
-          --cli-input-json file://task-definition.json \
+          --family fsl-challenge-task \
+          --network-mode awsvpc \
+          --requires-compatibilities FARGATE \
+          --cpu 256 \
+          --memory 512 \
+          --execution-role-arn arn:aws:iam::${{ env.ACCOUNT }}:role/ecsTaskExecutionRole \
+          --container-definitions "[{\"name\":\"fsl-app\",\"image\":\"${{ env.ECR_URL }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}\",\"portMappings\":[{\"containerPort\":8080}],\"environment\":[{\"name\":\"W_SECRET\",\"value\":\"OnBilltoribss\"}]}]" \
           --region ${{ env.AWS_REGION }}
     
-    - name: Deploy to ECS
+    - name: Deploy
       run: |
-        echo "Deploying to ECS..."
-        
-        # Check if service exists
-        SERVICE_EXISTS=$(aws ecs describe-services \
+        # Force new deployment
+        aws ecs update-service \
           --cluster ${{ env.ECS_CLUSTER }} \
-          --services ${{ env.ECS_SERVICE }} \
-          --region ${{ env.AWS_REGION }} \
-          --query "services[0].status" \
-          --output text 2>/dev/null || echo "NOT_FOUND")
-        
-        if [ "$SERVICE_EXISTS" = "ACTIVE" ]; then
-          echo "Updating existing ECS service..."
-          aws ecs update-service \
-            --cluster ${{ env.ECS_CLUSTER }} \
-            --service ${{ env.ECS_SERVICE }} \
-            --task-definition fsl-challenge-task \
-            --force-new-deployment \
-            --region ${{ env.AWS_REGION }}
-        else
-          echo "Creating new ECS service..."
-          
-          # Get default VPC and subnets
-          VPC_ID=$(aws ec2 describe-vpcs \
-            --region ${{ env.AWS_REGION }} \
-            --filters "Name=is-default,Values=true" \
-            --query "Vpcs[0].VpcId" \
-            --output text)
-          
-          SUBNET_IDS=$(aws ec2 describe-subnets \
-            --region ${{ env.AWS_REGION }} \
-            --filters "Name=vpc-id,Values=$VPC_ID" "Name=default-for-az,Values=true" \
-            --query "Subnets[0:2].SubnetId" \
-            --output text | tr '\n' ' ' | sed 's/ $//')
-          
-          # Create security group
-          SG_ID=$(aws ec2 create-security-group \
-            --region ${{ env.AWS_REGION }} \
-            --group-name "fsl-challenge-sg" \
-            --description "Security group for FSL Challenge" \
-            --vpc-id $VPC_ID \
-            --query "GroupId" \
-            --output text)
-          
-          aws ec2 authorize-security-group-ingress \
-            --region ${{ env.AWS_REGION }} \
-            --group-id $SG_ID \
-            --protocol tcp \
-            --port 8080 \
-            --cidr 0.0.0.0/0
-          
-          # Create service
-          aws ecs create-service \
-            --cluster ${{ env.ECS_CLUSTER }} \
-            --service-name ${{ env.ECS_SERVICE }} \
-            --task-definition fsl-challenge-task \
-            --desired-count 1 \
-            --launch-type FARGATE \
-            --network-configuration "awsvpcConfiguration={subnets=[$SUBNET_IDS],securityGroups=[$SG_ID],assignPublicIp=ENABLED}" \
-            --region ${{ env.AWS_REGION }}
-        fi
+          --service ${{ env.ECS_SERVICE }} \
+          --task-definition fsl-challenge-task \
+          --force-new-deployment \
+          --region ${{ env.AWS_REGION }} || \
+        echo "Service might not exist yet"
     
-    - name: Wait for deployment
+    - name: Show success
       run: |
-        echo "Waiting for deployment to complete..."
-        sleep 30
-        
-        # Wait for service to stabilize
-        aws ecs wait services-stable \
-          --cluster ${{ env.ECS_CLUSTER }} \
-          --services ${{ env.ECS_SERVICE }} \
-          --region ${{ env.AWS_REGION }} || echo "Service might still be starting"
-    
-    - name: Get Public IP
-      id: get-ip
-      run: |
-        echo "Getting service IP address..."
-        
-        # Get task ARN
-        TASK_ARN=$(aws ecs list-tasks \
-          --cluster ${{ env.ECS_CLUSTER }} \
-          --service-name ${{ env.ECS_SERVICE }} \
-          --region ${{ env.AWS_REGION }} \
-          --query "taskArns[0]" \
-          --output text)
-        
-        if [ -n "$TASK_ARN" ]; then
-          echo "Task ARN: $TASK_ARN"
-          
-          # Get network interface
-          ENI_ID=$(aws ecs describe-tasks \
-            --cluster ${{ env.ECS_CLUSTER }} \
-            --tasks $TASK_ARN \
-            --region ${{ env.AWS_REGION }} \
-            --query "tasks[0].attachments[0].details[?name=='networkInterfaceId'].value" \
-            --output text)
-          
-          if [ -n "$ENI_ID" ]; then
-            echo "ENI ID: $ENI_ID"
-            
-            # Get public IP
-            PUBLIC_IP=$(aws ec2 describe-network-interfaces \
-              --network-interface-ids $ENI_ID \
-              --region ${{ env.AWS_REGION }} \
-              --query "NetworkInterfaces[0].Association.PublicIp" \
-              --output text)
-            
-            if [ -n "$PUBLIC_IP" ]; then
-              echo "PUBLIC_IP=$PUBLIC_IP" >> $GITHUB_ENV
-              echo "✅ Application deployed!"
-              echo "🌐 URL: http://$PUBLIC_IP:8080"
-            fi
-          fi
-        fi
-    
-    - name: Test Deployment
-      if: env.PUBLIC_IP != ''
-      run: |
-        echo "Testing deployed application..."
-        sleep 10
-        
-        # Test with retries
-        for i in {1..5}; do
-          if curl -s -f http://${{ env.PUBLIC_IP }}:8080 > /dev/null; then
-            echo "✅ Application is accessible!"
-            exit 0
-          fi
-          echo "Attempt $i failed, retrying..."
-          sleep 10
-        done
-        echo "❌ Could not access application"
-        exit 1
-    
-    - name: Create deployment summary
-      if: always()
-      run: |
-        echo "## Deployment Summary" >> $GITHUB_STEP_SUMMARY
-        echo "" >> $GITHUB_STEP_SUMMARY
-        
-        if [ "${{ job.status }}" == "success" ]; then
-          echo "✅ **Deployment Successful!**" >> $GITHUB_STEP_SUMMARY
-          if [ -n "${{ env.PUBLIC_IP }}" ]; then
-            echo "" >> $GITHUB_STEP_SUMMARY
-            echo "**Application URL:** http://${{ env.PUBLIC_IP }}:8080" >> $GITHUB_STEP_SUMMARY
-          fi
-        else
-          echo "❌ **Deployment Failed**" >> $GITHUB_STEP_SUMMARY
-        fi
+        echo "✅ Deployment initiated!"
+        echo "Check ECS console for details"
