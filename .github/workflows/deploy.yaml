@@ -1,4 +1,4 @@
-name: Deploy to AWS ECS
+name: Deploy to AWS ECS (Fargate)
 
 on:
   workflow_dispatch:
@@ -8,6 +8,7 @@ env:
   ECR_REPOSITORY: fsl-challenge-app
   ECS_CLUSTER: fsl-challenge-cluster
   ECS_SERVICE: fsl-challenge-service
+  TASK_FAMILY: fsl-challenge-task
 
 jobs:
   deploy:
@@ -18,15 +19,14 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Debug Environment Variables
+      - name: Print Environment
         run: |
-          echo "AWS_REGION: $AWS_REGION"
-          echo "ECR_REPOSITORY: $ECR_REPOSITORY"
-          echo "ECS_CLUSTER: $ECS_CLUSTER"
-          echo "ECS_SERVICE: $ECS_SERVICE"
-          echo "GITHUB_SHA: $GITHUB_SHA"
+          echo "AWS_REGION=$AWS_REGION"
+          echo "ECR_REPOSITORY=$ECR_REPOSITORY"
+          echo "ECS_CLUSTER=$ECS_CLUSTER"
+          echo "ECS_SERVICE=$ECS_SERVICE"
 
-      - name: Configure AWS credentials
+      - name: Configure AWS Credentials
         uses: aws-actions/configure-aws-credentials@v2
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
@@ -37,21 +37,31 @@ jobs:
         run: |
           AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
           echo "AWS_ACCOUNT_ID=$AWS_ACCOUNT_ID" >> $GITHUB_ENV
-          echo "ECR_REGISTRY=$AWS_ACCOUNT_ID.dkr.ecr.${AWS_REGION}.amazonaws.com" >> $GITHUB_ENV
+          echo "ECR_REGISTRY=$AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com" >> $GITHUB_ENV
 
       - name: Login to Amazon ECR
         run: |
           aws ecr get-login-password --region $AWS_REGION | \
           docker login --username AWS --password-stdin $ECR_REGISTRY
 
-      - name: Prepare Dockerfile
+      - name: Ensure ECR Repository
+        run: |
+          aws ecr describe-repositories \
+            --repository-names "$ECR_REPOSITORY" \
+            --region "$AWS_REGION" >/dev/null 2>&1 || \
+          aws ecr create-repository \
+            --repository-name "$ECR_REPOSITORY" \
+            --region "$AWS_REGION"
+
+      - name: Build and Push Docker Image
         run: |
           cd codebase/rdicidr-0.1.0
+
           cat <<EOF > Dockerfile
-          FROM node:18-alpine as builder
+          FROM node:18-alpine AS builder
           WORKDIR /app
           COPY package*.json ./
-          RUN npm ci
+          RUN npm install
           COPY . .
           RUN npm run build
 
@@ -62,21 +72,20 @@ jobs:
           CMD ["nginx", "-g", "daemon off;"]
           EOF
 
-      - name: Build and Push Image
-        run: |
-          cd codebase/rdicidr-0.1.0
           IMAGE=$ECR_REGISTRY/$ECR_REPOSITORY:$GITHUB_SHA
           docker build -t $IMAGE .
           docker tag $IMAGE $ECR_REGISTRY/$ECR_REPOSITORY:latest
+
           docker push $IMAGE
           docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
-          echo "IMAGE_NAME=$IMAGE" >> $GITHUB_ENV
 
-      - name: Create Task Definition
+          echo "IMAGE_URI=$IMAGE" >> $GITHUB_ENV
+
+      - name: Register ECS Task Definition
         run: |
           cat <<EOF > task-definition.json
           {
-            "family": "fsl-challenge-task",
+            "family": "$TASK_FAMILY",
             "networkMode": "awsvpc",
             "requiresCompatibilities": ["FARGATE"],
             "cpu": "256",
@@ -85,8 +94,11 @@ jobs:
             "containerDefinitions": [
               {
                 "name": "fsl-app",
-                "image": "$IMAGE_NAME",
-                "portMappings": [{ "containerPort": 8080 }],
+                "image": "$IMAGE_URI",
+                "essential": true,
+                "portMappings": [
+                  { "containerPort": 8080, "protocol": "tcp" }
+                ],
                 "logConfiguration": {
                   "logDriver": "awslogs",
                   "options": {
@@ -103,24 +115,49 @@ jobs:
           aws ecs register-task-definition \
             --cli-input-json file://task-definition.json
 
-      - name: Deploy to ECS
+      - name: Create ECS Cluster (if not exists)
         run: |
-          aws ecs create-cluster --cluster-name $ECS_CLUSTER || true
+          aws ecs create-cluster \
+            --cluster-name $ECS_CLUSTER \
+            --region $AWS_REGION >/dev/null 2>&1 || true
 
-          aws ecs update-service \
+      - name: Deploy ECS Service
+        run: |
+          if aws ecs describe-services \
             --cluster $ECS_CLUSTER \
-            --service $ECS_SERVICE \
-            --task-definition fsl-challenge-task \
-            --force-new-deployment || \
-          aws ecs create-service \
+            --services $ECS_SERVICE \
+            --region $AWS_REGION >/dev/null 2>&1; then
+
+            echo "Updating ECS service..."
+            aws ecs update-service \
+              --cluster $ECS_CLUSTER \
+              --service $ECS_SERVICE \
+              --task-definition $TASK_FAMILY \
+              --force-new-deployment \
+              --region $AWS_REGION
+          else
+            echo "Creating ECS service..."
+            aws ecs create-service \
+              --cluster $ECS_CLUSTER \
+              --service-name $ECS_SERVICE \
+              --task-definition $TASK_FAMILY \
+              --desired-count 1 \
+              --launch-type FARGATE \
+              --network-configuration "awsvpcConfiguration={assignPublicIp=ENABLED}" \
+              --region $AWS_REGION
+          fi
+
+      - name: Wait for Deployment
+        run: |
+          aws ecs wait services-stable \
             --cluster $ECS_CLUSTER \
-            --service-name $ECS_SERVICE \
-            --task-definition fsl-challenge-task \
-            --desired-count 1 \
-            --launch-type FARGATE \
-            --network-configuration "awsvpcConfiguration={assignPublicIp=ENABLED}"
+            --services $ECS_SERVICE \
+            --region $AWS_REGION
 
       - name: Deployment Summary
         if: always()
         run: |
-          echo "### ECS Deployment Complete" >> $GITHUB_STEP_SUMMARY
+          echo "## ECS Deployment Summary" >> $GITHUB_STEP_SUMMARY
+          echo "- Cluster: $ECS_CLUSTER" >> $GITHUB_STEP_SUMMARY
+          echo "- Service: $ECS_SERVICE" >> $GITHUB_STEP_SUMMARY
+          echo "- Image: $IMAGE_URI" >> $GITHUB_STEP_SUMMARY
