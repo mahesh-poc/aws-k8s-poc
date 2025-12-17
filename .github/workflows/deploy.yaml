@@ -1,4 +1,4 @@
-name: Deploy to AWS ECS (Fargate)
+name: CD Pipeline - Deploy to AWS ECS
 
 on:
   workflow_dispatch:
@@ -15,18 +15,34 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
+    defaults:
+      run:
+        working-directory: codebase/rdicidr-0.1.0
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Print Environment
-        run: |
-          echo "AWS_REGION=$AWS_REGION"
-          echo "ECR_REPOSITORY=$ECR_REPOSITORY"
-          echo "ECS_CLUSTER=$ECS_CLUSTER"
-          echo "ECS_SERVICE=$ECS_SERVICE"
+      # 🔹 Match CI exactly
+      - name: Setup Node.js 15
+        uses: actions/setup-node@v4
+        with:
+          node-version: '15.14.0'
 
-      - name: Configure AWS Credentials
+      - name: Force npm 7
+        run: |
+          npm install -g npm@7
+          npm --version
+          node --version
+
+      - name: Install dependencies (CI-style)
+        run: npm ci
+
+      - name: Build application
+        run: npm run build
+
+      # 🔹 AWS Auth
+      - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v2
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
@@ -53,15 +69,14 @@ jobs:
             --repository-name "$ECR_REPOSITORY" \
             --region "$AWS_REGION"
 
-      - name: Build and Push Docker Image
+      # 🔹 Docker build aligned with CI
+      - name: Build & Push Docker Image
         run: |
-          cd codebase/rdicidr-0.1.0
-
           cat <<EOF > Dockerfile
-          FROM node:18-alpine AS builder
+          FROM node:15-alpine AS builder
           WORKDIR /app
           COPY package*.json ./
-          RUN npm install
+          RUN npm install -g npm@7 && npm ci
           COPY . .
           RUN npm run build
 
@@ -75,13 +90,13 @@ jobs:
           IMAGE=$ECR_REGISTRY/$ECR_REPOSITORY:$GITHUB_SHA
           docker build -t $IMAGE .
           docker tag $IMAGE $ECR_REGISTRY/$ECR_REPOSITORY:latest
-
           docker push $IMAGE
           docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
 
           echo "IMAGE_URI=$IMAGE" >> $GITHUB_ENV
 
-      - name: Register ECS Task Definition
+      # 🔹 ECS Task Definition
+      - name: Register Task Definition
         run: |
           cat <<EOF > task-definition.json
           {
@@ -97,7 +112,7 @@ jobs:
                 "image": "$IMAGE_URI",
                 "essential": true,
                 "portMappings": [
-                  { "containerPort": 8080, "protocol": "tcp" }
+                  { "containerPort": 8080 }
                 ],
                 "logConfiguration": {
                   "logDriver": "awslogs",
@@ -115,7 +130,7 @@ jobs:
           aws ecs register-task-definition \
             --cli-input-json file://task-definition.json
 
-      - name: Create ECS Cluster (if not exists)
+      - name: Create Cluster (if needed)
         run: |
           aws ecs create-cluster \
             --cluster-name $ECS_CLUSTER \
@@ -128,36 +143,31 @@ jobs:
             --services $ECS_SERVICE \
             --region $AWS_REGION >/dev/null 2>&1; then
 
-            echo "Updating ECS service..."
             aws ecs update-service \
               --cluster $ECS_CLUSTER \
               --service $ECS_SERVICE \
               --task-definition $TASK_FAMILY \
-              --force-new-deployment \
-              --region $AWS_REGION
+              --force-new-deployment
           else
-            echo "Creating ECS service..."
             aws ecs create-service \
               --cluster $ECS_CLUSTER \
               --service-name $ECS_SERVICE \
               --task-definition $TASK_FAMILY \
               --desired-count 1 \
               --launch-type FARGATE \
-              --network-configuration "awsvpcConfiguration={assignPublicIp=ENABLED}" \
-              --region $AWS_REGION
+              --network-configuration "awsvpcConfiguration={assignPublicIp=ENABLED}"
           fi
 
-      - name: Wait for Deployment
+      - name: Wait for Service Stability
         run: |
           aws ecs wait services-stable \
             --cluster $ECS_CLUSTER \
-            --services $ECS_SERVICE \
-            --region $AWS_REGION
+            --services $ECS_SERVICE
 
       - name: Deployment Summary
         if: always()
         run: |
-          echo "## ECS Deployment Summary" >> $GITHUB_STEP_SUMMARY
+          echo "## ECS Deployment Completed" >> $GITHUB_STEP_SUMMARY
           echo "- Cluster: $ECS_CLUSTER" >> $GITHUB_STEP_SUMMARY
           echo "- Service: $ECS_SERVICE" >> $GITHUB_STEP_SUMMARY
           echo "- Image: $IMAGE_URI" >> $GITHUB_STEP_SUMMARY
