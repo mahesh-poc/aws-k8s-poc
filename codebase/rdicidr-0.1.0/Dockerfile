@@ -1,21 +1,31 @@
-FROM node:15 as builder
+# Build stage
+FROM node:15-alpine as builder
 
-WORKDIR
+WORKDIR /app
 
-COPY
+# Copy package files
+COPY package*.json ./
 
-RUN 
+# Install dependencies
+RUN npm ci
 
-COPY
+# Copy source code
+COPY . .
 
-RUN 
+# Build the React app
+RUN npm run build
 
-FROM
+# Production stage
+FROM nginx:alpine
 
-WORKDIR
+# Copy built files from builder stage
+COPY --from=builder /app/build /usr/share/nginx/html
 
-COPY
+# Change nginx to listen on port 8080
+RUN sed -i 's/listen\(.*\)80;/listen 8080;/' /etc/nginx/conf.d/default.conf
 
-RUN 
+# Expose port 8080
+EXPOSE 8080
 
-ENTRYPOINT 
+# Start nginx
+CMD ["nginx", "-g", "daemon off;"]
