@@ -123,8 +123,7 @@ jobs:
       run: |
         echo "Creating task definition..."
         
-        cat > task-definition.json << 'EOF'
-{
+        cat > task-definition.json << 'EOF'{
   "family": "fsl-challenge-task",
   "networkMode": "awsvpc",
   "requiresCompatibilities": ["FARGATE"],
