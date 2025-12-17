@@ -1,0 +1,28 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: fsl-challenge-app
+  namespace: production
+spec:
+  serviceName: fsl-service
+  replicas: 3
+  selector:
+    matchLabels:
+      app: fsl-challenge
+  template:
+    metadata:
+      labels:
+        app: fsl-challenge
+    spec:
+      containers:
+      - name: fsl-app
+        image: fsl-challenge-app:latest
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 8080
+        env:
+        - name: W_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: app-secret
+              key: W_SECRET
