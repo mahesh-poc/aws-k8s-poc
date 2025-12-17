@@ -211,6 +211,7 @@ jobs:
               --task-definition $TASK_FAMILY \
               --desired-count 1 \
               --launch-type FARGATE \
+              --enable-execute-command \
               --network-configuration "awsvpcConfiguration={subnets=[$SUBNETS],securityGroups=[$SECURITY_GROUP],assignPublicIp=ENABLED}" \
               --region $AWS_REGION
           else
