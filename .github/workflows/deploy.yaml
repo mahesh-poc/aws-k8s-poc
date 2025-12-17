@@ -135,7 +135,9 @@ jobs:
             --output text)
 
           SUBNETS=$(aws ec2 describe-subnets \
-            --filters Name=vpc-id,Values=$VPC_ID \
+            --filters \
+              Name=vpc-id,Values=$VPC_ID \
+              Name=map-public-ip-on-launch,Values=true \
             --query 'Subnets[*].SubnetId' \
             --output text | tr '\t' ',')
 
