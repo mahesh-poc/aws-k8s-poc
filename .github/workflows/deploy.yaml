@@ -153,7 +153,7 @@ jobs:
           aws ec2 authorize-security-group-ingress \
             --group-id $SG_ID \
             --protocol tcp \
-            --port 8080 \
+            --port 80 \
             --cidr 0.0.0.0/0 >/dev/null 2>&1 || true
 
           echo "SUBNETS=$SUBNETS" >> $GITHUB_ENV
@@ -172,7 +172,6 @@ jobs:
             "cpu": "256",
             "memory": "512",
             "executionRoleArn": "arn:aws:iam::$AWS_ACCOUNT_ID:role/ecsTaskExecutionRole",
-            "taskRoleArn": "arn:aws:iam::$AWS_ACCOUNT_ID:role/ecsTaskRole",
             "containerDefinitions": [
               {
                 "name": "$CONTAINER_NAME",
